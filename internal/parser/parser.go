@@ -36,7 +36,11 @@ func extractLinks(doc *html.Node) []string {
 		if n.Type == html.ElementNode && n.Data == "a" {
 			for _, attr := range n.Attr {
 				if attr.Key == "href" {
-					links = append(links, attr.Val)
+					val := strings.TrimSpace(attr.Val)
+					if val != "" {
+						links = append(links, val)
+					}
+					break
 				}
 			}
 		}
