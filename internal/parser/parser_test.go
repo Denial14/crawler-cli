@@ -51,7 +51,7 @@ func TestParseHTML_EmptyTitle(t *testing.T) {
 }
 
 func TestParseHTML_NoLinks(t *testing.T) {
-	htmlInput := `<html><head>title>Test</title></head><body><p>Hello</p></body></html>`
+	htmlInput := `<html><head><title>Test</title></head><body><p>Hello</p></body></html>`
 
 	_, links, err := ParseHTML(strings.NewReader(htmlInput))
 	if err != nil {
@@ -119,7 +119,7 @@ func TestParseHTML_AnchorWithoutHref(t *testing.T) {
 	}
 }
 
-func testParseHTML_MultipleHref(t *testing.T) {
+func TestParseHTML_MultipleHref(t *testing.T) {
 	htmlInput := `<html><head><title>T</title></head><body><a href="/first" href="/second">X</a></body></html>`
 
 	_, links, err := ParseHTML(strings.NewReader(htmlInput))
@@ -127,6 +127,9 @@ func testParseHTML_MultipleHref(t *testing.T) {
 		t.Fatalf("expected no error, but got: %v", err)
 	}
 
+	if len(links) != 1 {
+		t.Fatalf("links: expected 1, but got: %d", len(links))
+	}
 	if len(links) != 1 || links[0] != "/first" {
 		t.Errorf("links: expected [/first], but got: %s", links[0])
 	}

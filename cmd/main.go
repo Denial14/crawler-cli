@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -54,7 +55,7 @@ func main() {
 	}
 	defer logFile.Close()
 
-	logger := log.New(logFile, "", log.LstdFlags|log.Lshortfile)
+	logger := log.New(io.MultiWriter(os.Stdout, logFile), "", log.LstdFlags|log.Lshortfile)
 	logger.Printf("[INFO] start crawler, urls=%v, depth=%d, timeout=%s, req_timeout=%s", urls, *depthFlag, *timeoutFlag, *reqTimeoutFlag)
 
 	c := crawler.New(logger, *depthFlag, *reqTimeoutFlag)
