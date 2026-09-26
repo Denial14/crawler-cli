@@ -12,13 +12,13 @@ go build -o crawler-cli ./cmd/main.go
 Linux / macOS:
 
 ```bash
-./crawler-cli --urls https://example.com,https://go.dev --depth 3 --timeout 2m --request-timeout 10s --output result.json --log crawler.log
+./crawler-cli --urls https://go.dev --depth 3 --timeout 1m --request-timeout 5s --output result.json --log crawler.log
 ```
 
 Windows (PowerShell):
 
 ```powershell
-.\crawler-cli.exe --urls https://example.com,https://go.dev --depth 3 --timeout 2m --request-timeout 10s --output result.json --log crawler.log
+.\crawler-cli.exe --urls https://go.dev --depth 3 --timeout 1m --request-timeout 5s --output result.json --log crawler.log
 ```
 
 Запуск без сборки:
