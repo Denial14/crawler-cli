@@ -1,20 +1,36 @@
 # Crawler CLI
-CLI-краулер для обхода веб-сайтов
+CLI-краулер для обхода веб-сайтов и построения дерева найденных страниц.
 
-## Сборка:
+## Сборка
 
 ```bash
 go build -o crawler-cli ./cmd/main.go
 ```
 
-## Запуск:
+## Запуск
+
+Linux / macOS:
 
 ```bash
 ./crawler-cli --urls https://example.com,https://go.dev --depth 3 --timeout 2m --request-timeout 10s --output result.json --log crawler.log
 ```
 
-## Флаги:
+Windows (PowerShell):
 
+```powershell
+.\crawler-cli.exe --urls https://example.com,https://go.dev --depth 3 --timeout 2m --request-timeout 10s --output result.json --log crawler.log
+```
+
+Запуск без сборки:
+
+```bash
+go run ./cmd/main.go --urls https://example.com --depth 1 --timeout 10s
+```
+
+## Флаги
+
+| Флаг | По умолчанию | Описание |
+|------|--------------|----------|
 | `--urls` | — (обязательный) | Список стартовых URL через запятую |
 | `--depth` | `3` | Максимальная глубина рекурсивного обхода |
 | `--timeout` | `30s` | Общий таймаут на весь обход |
@@ -31,7 +47,7 @@ go build -o crawler-cli ./cmd/main.go
 
 Нажмите `Ctrl+C` во время работы программы. Краулер корректно завершит все воркеры, дособерёт уже полученные результаты и сохранит их в JSON.
 
-##Тесты
+## Тесты
 
 ```bash
 go test ./... -race
