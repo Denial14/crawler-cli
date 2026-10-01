@@ -66,7 +66,7 @@ func (c *Crawler) markVisited(url string) bool {
 	return true
 }
 
-func (c *Crawler) worker(ctx context.Context, id int, jobs chan Job, results chan<- pageResult, wg *sync.WaitGroup, tasks *sync.WaitGroup) {
+func (c *Crawler) worker(ctx context.Context, id int, jobs chan Job, newJobs chan<- Job, results chan<- pageResult, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	for {
@@ -79,13 +79,12 @@ func (c *Crawler) worker(ctx context.Context, id int, jobs chan Job, results cha
 				c.logger.Printf("[INFO] worker %d: the channel is closed", id)
 				return
 			}
-			c.processURL(ctx, job, jobs, results, tasks)
-			tasks.Done()
+			c.processURL(ctx, job, newJobs, results)
 		}
 	}
 }
 
-func (c *Crawler) processURL(ctx context.Context, job Job, jobs chan<- Job, results chan<- pageResult, tasks *sync.WaitGroup) {
+func (c *Crawler) processURL(ctx context.Context, job Job, newJobs chan<- Job, results chan<- pageResult) {
 	if !c.markVisited(job.URL) {
 		return
 	}
@@ -171,12 +170,10 @@ func (c *Crawler) processURL(ctx context.Context, job Job, jobs chan<- Job, resu
 	}
 
 	for _, nj := range nextJobs {
-		tasks.Add(1)
 		select {
 		case <-ctx.Done():
-			tasks.Done()
 			return
-		case jobs <- Job{URL: nj.URL, Depth: nj.Depth}:
+		case newJobs <- nj:
 		}
 	}
 }
@@ -218,46 +215,83 @@ func sameDomain(base *url.URL, link string) bool {
 
 func (c *Crawler) Run(ctx context.Context, startURLs []string) map[string]*models.Node {
 	jobs := make(chan Job, jobsBuffer)
+	newJobs := make(chan Job, jobsBuffer)
 	results := make(chan pageResult, resultBuffer)
 
 	var workersWG sync.WaitGroup
-	var tasksWG sync.WaitGroup
+	var schedulerWG sync.WaitGroup
 
 	for id := 1; id <= c.maxWorkers; id++ {
 		workersWG.Add(1)
 		go func() {
-			c.worker(ctx, id, jobs, results, &workersWG, &tasksWG)
+			c.worker(ctx, id, jobs, newJobs, results, &workersWG)
 		}()
 	}
 
-	for _, u := range startURLs {
-		tasksWG.Add(1)
-		select {
-		case <-ctx.Done():
-			tasksWG.Done()
-		case jobs <- Job{URL: u, Depth: 0}:
-		}
-	}
-
-	go func() {
-		tasksWG.Wait()
-		close(jobs)
-	}()
-
 	go func() {
 		workersWG.Wait()
-		close(results)
+		close(newJobs)
 	}()
 
 	nodesByURL := make(map[string]*models.Node)
 	linksByURL := make(map[string][]string)
 
-	for res := range results {
-		nodesByURL[res.node.Resource] = res.node
-		linksByURL[res.node.Resource] = res.links
-	}
+	schedulerWG.Add(1)
+	go func() {
+		defer schedulerWG.Done()
+		defer close(jobs)
+		defer close(results)
 
-	roots := make(map[string]*models.Node, 0)
+		pending := len(startURLs)
+
+		for _, u := range startURLs {
+			select {
+			case jobs <- Job{URL: u, Depth: 0}:
+			case <-ctx.Done():
+				return
+			}
+		}
+
+		for pending > 0 {
+			select {
+			case <-ctx.Done():
+				return
+
+			case res, ok := <-results:
+				if !ok {
+					continue
+				}
+				nodesByURL[res.node.Resource] = res.node
+				linksByURL[res.node.Resource] = res.links
+				pending--
+
+			case j, ok := <-newJobs:
+				if !ok {
+					continue
+				}
+				pending++
+			put:
+				for {
+					select {
+					case jobs <- j:
+						break put
+					case res, ok := <-results:
+						if !ok {
+							continue
+						}
+						nodesByURL[res.node.Resource] = res.node
+						linksByURL[res.node.Resource] = res.links
+						pending--
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
+		}
+	}()
+
+	schedulerWG.Wait()
+	roots := make(map[string]*models.Node, len(startURLs))
 	for _, u := range startURLs {
 		root, ok := nodesByURL[u]
 		if !ok {
