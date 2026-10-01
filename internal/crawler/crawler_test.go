@@ -208,3 +208,31 @@ func TestCrawler_PartialFailure(t *testing.T) {
 		t.Errorf("expected OK, but got %q", root.Links[0].Title)
 	}
 }
+
+func TestCrawler_DuplicatesChildren(t *testing.T) {
+	srv := newTestServer(t, map[string]string{
+		"/": `<html><head><title>Home</title></head><body>
+			<a href="/a">A</a>
+			<a href="/a">A again</a>
+			<a href="/a">A third time</a>
+		</body></html>`,
+		"/a": `<html><head><title>A</title></head><body></body></html>`,
+	})
+
+	c := New(logger(), 2, 5*time.Second)
+	roots := c.Run(context.Background(), []string{srv.URL})
+
+	root := roots[srv.URL]
+
+	if root == nil {
+		t.Fatal("no root")
+	}
+
+	if len(roots) != 1 {
+		t.Fatalf("roots: expected 1 link, but got: %d", len(roots))
+	}
+
+	if root.Links[0].Title != "A" {
+		t.Errorf("child title: expected 'A', but got: %q", root.Links[0].Title)
+	}
+}

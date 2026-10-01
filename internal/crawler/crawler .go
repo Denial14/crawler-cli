@@ -286,7 +286,14 @@ func BuildTree(node *models.Node, nodesByURL map[string]*models.Node, linksByURL
 		Links:    make([]*models.Node, 0),
 	}
 
+	seenChildren := make(map[string]bool)
+
 	for _, link := range linksByURL[node.Resource] {
+		if seenChildren[link] {
+			continue
+		}
+		seenChildren[link] = true
+
 		child, ok := nodesByURL[link]
 		if !ok {
 			continue
