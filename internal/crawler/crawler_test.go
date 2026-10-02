@@ -232,6 +232,14 @@ func TestCrawler_DuplicatesChildren(t *testing.T) {
 		t.Fatalf("roots: expected 1 link, but got: %d", len(roots))
 	}
 
+	seen := make(map[string]bool)
+	for _, child := range root.Links {
+		if seen[child.Resource] {
+			t.Errorf("duplicate child: %s", child.Resource)
+		}
+		seen[child.Resource] = true
+	}
+
 	if root.Links[0].Title != "A" {
 		t.Errorf("child title: expected 'A', but got: %q", root.Links[0].Title)
 	}
@@ -259,5 +267,28 @@ func TestCrawler_LargeFanOut(t *testing.T) {
 	}
 	if len(root.Links) != 200 {
 		t.Errorf("links: expected 200, got %d", len(root.Links))
+	}
+}
+
+func TestCrawler_ContextCancel(t *testing.T) {
+	srv := newTestServer(t, map[string]string{
+		"/": `<html><head><title>Home</title></head><body></body></html>`,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	c := New(logger(), 2, 5*time.Second)
+
+	done := make(chan struct{})
+	go func() {
+		c.Run(ctx, []string{srv.URL})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return after context cancel")
 	}
 }

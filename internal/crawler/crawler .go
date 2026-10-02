@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -25,10 +24,11 @@ type Crawler struct {
 	maxDepth       int
 	maxWorkers     int
 	requestTimeout time.Duration
-	visited        map[string]bool
+
 	mu             sync.Mutex
-	pending        atomic.Int64
-	pendingRes     atomic.Int64
+	visited        map[string]bool
+	pending        int
+	pendingResults int
 }
 
 type Job struct {
@@ -69,6 +69,36 @@ func (c *Crawler) markVisited(u string) bool {
 	return true
 }
 
+func (c *Crawler) incPending() {
+	c.mu.Lock()
+	c.pending++
+	c.mu.Unlock()
+}
+
+func (c *Crawler) decPending() {
+	c.mu.Lock()
+	c.pending--
+	c.mu.Unlock()
+}
+
+func (c *Crawler) incPendingResults() {
+	c.mu.Lock()
+	c.pendingResults++
+	c.mu.Unlock()
+}
+
+func (c *Crawler) decPendingResults() {
+	c.mu.Lock()
+	c.pendingResults--
+	c.mu.Unlock()
+}
+
+func (c *Crawler) isDone() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pending == 0 && c.pendingResults == 0
+}
+
 func (c *Crawler) worker(ctx context.Context, id int, jobs <-chan Job, newJobs chan<- Job, results chan<- pageResult, wg *sync.WaitGroup) {
 	defer wg.Done()
 
@@ -81,7 +111,7 @@ func (c *Crawler) worker(ctx context.Context, id int, jobs <-chan Job, newJobs c
 				return
 			}
 			c.processURL(ctx, job, newJobs, results)
-			c.pending.Add(-1)
+			c.decPending()
 		}
 	}
 }
@@ -154,10 +184,10 @@ func (c *Crawler) processURL(ctx context.Context, job Job, newJobs chan<- Job, r
 		}
 	}
 
-	c.pendingRes.Add(1)
+	c.incPendingResults()
 	select {
 	case <-ctx.Done():
-		c.pendingRes.Add(-1)
+		c.decPendingResults()
 		return
 	case results <- pageResult{
 		node: &models.Node{
@@ -170,10 +200,10 @@ func (c *Crawler) processURL(ctx context.Context, job Job, newJobs chan<- Job, r
 	}
 
 	for _, nj := range nextJobs {
-		c.pending.Add(1)
+		c.incPending()
 		select {
 		case <-ctx.Done():
-			c.pending.Add(-1)
+			c.decPending()
 			return
 		case newJobs <- nj:
 		}
@@ -224,7 +254,6 @@ func (c *Crawler) Run(ctx context.Context, startURLs []string) map[string]*model
 	results := make(chan pageResult, resultBuffer)
 
 	var workersWG sync.WaitGroup
-	var schedulerWG sync.WaitGroup
 
 	for id := 1; id <= c.maxWorkers; id++ {
 		workersWG.Add(1)
@@ -233,22 +262,27 @@ func (c *Crawler) Run(ctx context.Context, startURLs []string) map[string]*model
 		}(id)
 	}
 
-	go func() {
-		workersWG.Wait()
-		close(newJobs)
-	}()
-
 	nodesByURL := make(map[string]*models.Node)
 	linksByURL := make(map[string][]string)
 
-	schedulerWG.Add(1)
-	go func() {
-		defer schedulerWG.Done()
-		defer close(jobs)
-		defer close(results)
+	c.mu.Lock()
+	c.pending = len(startURLs)
+	c.pendingResults = 0
+	c.mu.Unlock()
 
-		c.pending.Store(int64(len(startURLs)))
-		c.pendingRes.Store(0)
+	collectorDone := make(chan struct{})
+	go func() {
+		defer close(collectorDone)
+		for res := range results {
+			nodesByURL[res.node.Resource] = res.node
+			linksByURL[res.node.Resource] = res.links
+			c.decPendingResults()
+		}
+	}()
+
+	schedulerDone := make(chan struct{})
+	go func() {
+		defer close(schedulerDone)
 
 		for _, u := range startURLs {
 			select {
@@ -258,13 +292,8 @@ func (c *Crawler) Run(ctx context.Context, startURLs []string) map[string]*model
 			}
 		}
 
-		pollTick := time.NewTicker(50 * time.Millisecond)
-		defer pollTick.Stop()
-
 		for {
-			p := c.pending.Load()
-			r := c.pendingRes.Load()
-			if p == 0 && r == 0 {
+			if c.isDone() {
 				return
 			}
 
@@ -272,42 +301,27 @@ func (c *Crawler) Run(ctx context.Context, startURLs []string) map[string]*model
 			case <-ctx.Done():
 				return
 
-			case res, ok := <-results:
-				if !ok {
+			case j := <-newJobs:
+				select {
+				case jobs <- j:
+				case <-ctx.Done():
 					return
 				}
-				c.pendingRes.Add(-1)
-				nodesByURL[res.node.Resource] = res.node
-				linksByURL[res.node.Resource] = res.links
 
-			case j, ok := <-newJobs:
-				if !ok {
-					newJobs = nil
-					continue
-				}
-			put:
-				for {
-					select {
-					case jobs <- j:
-						break put
-					case res, ok := <-results:
-						if !ok {
-							return
-						}
-						c.pendingRes.Add(-1)
-						nodesByURL[res.node.Resource] = res.node
-						linksByURL[res.node.Resource] = res.links
-					case <-ctx.Done():
-						return
-					}
-				}
-
-			case <-pollTick.C:
+			case <-time.After(50 * time.Millisecond):
 			}
 		}
 	}()
 
-	schedulerWG.Wait()
+	<-schedulerDone
+
+	close(jobs)
+	workersWG.Wait()
+
+	close(newJobs)
+	close(results)
+
+	<-collectorDone
 
 	roots := make(map[string]*models.Node, len(startURLs))
 	for _, u := range startURLs {

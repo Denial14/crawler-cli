@@ -56,7 +56,7 @@ func extractLinks(doc *html.Node) []string {
 func ParseHTML(r io.Reader) (string, []string, error) {
 	doc, err := html.Parse(r)
 	if err != nil {
-		return "", nil, err
+		return "", []string{}, err
 	}
 
 	title := extractTitle(doc)
