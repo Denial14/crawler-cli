@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,6 +27,8 @@ type Crawler struct {
 	requestTimeout time.Duration
 	visited        map[string]bool
 	mu             sync.Mutex
+	pending        atomic.Int64
+	pendingRes     atomic.Int64
 }
 
 type Job struct {
@@ -56,30 +59,29 @@ func New(logger *log.Logger, maxDepth int, reqTimeout time.Duration) *Crawler {
 	}
 }
 
-func (c *Crawler) markVisited(url string) bool {
+func (c *Crawler) markVisited(u string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.visited[url] {
+	if c.visited[u] {
 		return false
 	}
-	c.visited[url] = true
+	c.visited[u] = true
 	return true
 }
 
-func (c *Crawler) worker(ctx context.Context, id int, jobs chan Job, newJobs chan<- Job, results chan<- pageResult, wg *sync.WaitGroup) {
+func (c *Crawler) worker(ctx context.Context, id int, jobs <-chan Job, newJobs chan<- Job, results chan<- pageResult, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	for {
 		select {
 		case <-ctx.Done():
-			c.logger.Printf("[INFO] worker %d terminates upon receiving a signal ctx", id)
 			return
 		case job, ok := <-jobs:
 			if !ok {
-				c.logger.Printf("[INFO] worker %d: the channel is closed", id)
 				return
 			}
 			c.processURL(ctx, job, newJobs, results)
+			c.pending.Add(-1)
 		}
 	}
 }
@@ -94,13 +96,13 @@ func (c *Crawler) processURL(ctx context.Context, job Job, newJobs chan<- Job, r
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, job.URL, nil)
 	if err != nil {
-		c.logger.Printf("[ERROR] %s: error of creating a timeout: %v", job.URL, err)
+		c.logger.Printf("[ERROR] %s: %v", job.URL, err)
 		return
 	}
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		c.logger.Printf("[ERROR] %s: request: %v", job.URL, err)
+		c.logger.Printf("[ERROR] %s: %v", job.URL, err)
 		return
 	}
 	defer resp.Body.Close()
@@ -108,18 +110,17 @@ func (c *Crawler) processURL(ctx context.Context, job Job, newJobs chan<- Job, r
 	c.logger.Printf("[INFO] %s: http code: %d", job.URL, resp.StatusCode)
 
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		c.logger.Printf("[WARN] %s: redirect on %s, skipping", job.URL, resp.Header.Get("Location"))
+		c.logger.Printf("[WARN] %s: redirect, skipping", job.URL)
 		return
 	}
-
 	if resp.StatusCode != http.StatusOK {
-		c.logger.Printf("[WARN] %s: status: %d, skipping", job.URL, resp.StatusCode)
+		c.logger.Printf("[WARN] %s: status %d, skipping", job.URL, resp.StatusCode)
 		return
 	}
 
 	contentType := resp.Header.Get("Content-Type")
 	if !strings.HasPrefix(contentType, "text/html") {
-		c.logger.Printf("[WARN] %s: not html: %s, skipping", job.URL, contentType)
+		c.logger.Printf("[WARN] %s: not html, skipping", job.URL)
 		return
 	}
 
@@ -129,7 +130,7 @@ func (c *Crawler) processURL(ctx context.Context, job Job, newJobs chan<- Job, r
 		return
 	}
 
-	c.logger.Printf("[INFO] %s: title: %s; links count: %d; depth: %d", job.URL, title, len(links), job.Depth)
+	c.logger.Printf("[INFO] %s: title=%q links=%d depth=%d", job.URL, title, len(links), job.Depth)
 
 	absoluteLinks := make([]string, 0)
 	nextJobs := make([]Job, 0)
@@ -147,31 +148,32 @@ func (c *Crawler) processURL(ctx context.Context, job Job, newJobs chan<- Job, r
 				if !sameDomain(baseURL, absolute) {
 					continue
 				}
-
 				absoluteLinks = append(absoluteLinks, absolute)
 				nextJobs = append(nextJobs, Job{URL: absolute, Depth: job.Depth + 1})
 			}
 		}
-
 	}
 
-	result := pageResult{
+	c.pendingRes.Add(1)
+	select {
+	case <-ctx.Done():
+		c.pendingRes.Add(-1)
+		return
+	case results <- pageResult{
 		node: &models.Node{
 			Resource: job.URL,
 			Title:    title,
-			Links:    make([]*models.Node, 0)},
+			Links:    make([]*models.Node, 0),
+		},
 		links: absoluteLinks,
-	}
-
-	select {
-	case <-ctx.Done():
-		return
-	case results <- result:
+	}:
 	}
 
 	for _, nj := range nextJobs {
+		c.pending.Add(1)
 		select {
 		case <-ctx.Done():
+			c.pending.Add(-1)
 			return
 		case newJobs <- nj:
 		}
@@ -184,7 +186,10 @@ func resolveURL(base *url.URL, link string) (string, bool) {
 		return "", false
 	}
 
-	if strings.HasPrefix(link, "mailto:") || strings.HasPrefix(link, "javascript:") || strings.HasPrefix(link, "data:") || strings.HasPrefix(link, "tel:") {
+	if strings.HasPrefix(link, "mailto:") ||
+		strings.HasPrefix(link, "javascript:") ||
+		strings.HasPrefix(link, "data:") ||
+		strings.HasPrefix(link, "tel:") {
 		return "", false
 	}
 
@@ -205,8 +210,8 @@ func resolveURL(base *url.URL, link string) (string, bool) {
 	return absolute.String(), true
 }
 
-func sameDomain(base *url.URL, link string) bool {
-	parsed, err := url.Parse(link)
+func sameDomain(base *url.URL, target string) bool {
+	parsed, err := url.Parse(target)
 	if err != nil {
 		return false
 	}
@@ -223,9 +228,9 @@ func (c *Crawler) Run(ctx context.Context, startURLs []string) map[string]*model
 
 	for id := 1; id <= c.maxWorkers; id++ {
 		workersWG.Add(1)
-		go func() {
+		go func(id int) {
 			c.worker(ctx, id, jobs, newJobs, results, &workersWG)
-		}()
+		}(id)
 	}
 
 	go func() {
@@ -242,7 +247,8 @@ func (c *Crawler) Run(ctx context.Context, startURLs []string) map[string]*model
 		defer close(jobs)
 		defer close(results)
 
-		pending := len(startURLs)
+		c.pending.Store(int64(len(startURLs)))
+		c.pendingRes.Store(0)
 
 		for _, u := range startURLs {
 			select {
@@ -252,24 +258,33 @@ func (c *Crawler) Run(ctx context.Context, startURLs []string) map[string]*model
 			}
 		}
 
-		for pending > 0 {
+		pollTick := time.NewTicker(50 * time.Millisecond)
+		defer pollTick.Stop()
+
+		for {
+			p := c.pending.Load()
+			r := c.pendingRes.Load()
+			if p == 0 && r == 0 {
+				return
+			}
+
 			select {
 			case <-ctx.Done():
 				return
 
 			case res, ok := <-results:
 				if !ok {
-					continue
+					return
 				}
+				c.pendingRes.Add(-1)
 				nodesByURL[res.node.Resource] = res.node
 				linksByURL[res.node.Resource] = res.links
-				pending--
 
 			case j, ok := <-newJobs:
 				if !ok {
+					newJobs = nil
 					continue
 				}
-				pending++
 			put:
 				for {
 					select {
@@ -277,20 +292,23 @@ func (c *Crawler) Run(ctx context.Context, startURLs []string) map[string]*model
 						break put
 					case res, ok := <-results:
 						if !ok {
-							continue
+							return
 						}
+						c.pendingRes.Add(-1)
 						nodesByURL[res.node.Resource] = res.node
 						linksByURL[res.node.Resource] = res.links
-						pending--
 					case <-ctx.Done():
 						return
 					}
 				}
+
+			case <-pollTick.C:
 			}
 		}
 	}()
 
 	schedulerWG.Wait()
+
 	roots := make(map[string]*models.Node, len(startURLs))
 	for _, u := range startURLs {
 		root, ok := nodesByURL[u]

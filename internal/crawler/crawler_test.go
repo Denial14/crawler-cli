@@ -236,3 +236,28 @@ func TestCrawler_DuplicatesChildren(t *testing.T) {
 		t.Errorf("child title: expected 'A', but got: %q", root.Links[0].Title)
 	}
 }
+
+func TestCrawler_LargeFanOut(t *testing.T) {
+	pages := map[string]string{}
+	home := `<html><head><title>Home</title></head><body>`
+	for i := 0; i < 200; i++ {
+		path := fmt.Sprintf("/page%d", i)
+		home += fmt.Sprintf(`<a href="%s">P%d</a>`, path, i)
+		pages[path] = fmt.Sprintf(`<html><head><title>Page%d</title></head><body></body></html>`, i)
+	}
+	home += `</body></html>`
+	pages["/"] = home
+
+	srv := newTestServer(t, pages)
+	c := New(logger(), 1, 5*time.Second)
+
+	roots := c.Run(context.Background(), []string{srv.URL})
+	root := roots[srv.URL]
+
+	if root == nil {
+		t.Fatal("no root")
+	}
+	if len(root.Links) != 200 {
+		t.Errorf("links: expected 200, got %d", len(root.Links))
+	}
+}
